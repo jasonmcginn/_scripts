@@ -1,0 +1,8 @@
+# Never commit private or generated-at-runtime material
+_private/
+*.log
+*.txt
+!requirements.txt
+.vscode/
+Thumbs.db
+desktop.ini
