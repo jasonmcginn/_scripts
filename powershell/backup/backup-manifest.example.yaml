@@ -1,0 +1,120 @@
+# =====================================================================
+# Backup manifest (example) for Invoke-Backup.ps1
+#
+# Copy next to Invoke-Backup.ps1 as backup-manifest.yaml and edit.
+# Humans edit this file; the script never rewrites it. Run history goes
+# to the history file, one line per job run, appended by the script.
+#
+# Keep your real manifest private: it describes your folders and drives.
+# =====================================================================
+
+manifest_version: 1
+updated: YYYY-MM-DD
+owner: Your Name
+
+# ---------------------------------------------------------------------
+# Defaults: every job inherits these unless it overrides them
+# ---------------------------------------------------------------------
+defaults:
+  backup_root: 'D:\Backups'
+  history_file: 'backup-history.jsonl'   # in backup_root
+  logs_folder: '_logs'                   # in backup_root; one robocopy log per run
+  folder_name_format: 'yyyy-MM-dd'       # use 'yyyy-MM-dd_HHmm' for more than one run a day
+  layout: mirror                         # each dated folder mirrors the source
+  method: copy                           # copy | compress (compress not built yet; copies and warns)
+  verify:
+    hash: SHA256                         # any Get-FileHash algorithm: SHA256, SHA384, SHA512 ...
+    write_hash_file: true                # save the hash list inside each backup
+  retention:                             # report only: the script never deletes
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+  exclude:                               # trailing \ = folder; contains \ = path under the source; else name/wildcard
+    - '.trash\'
+    - '*.tmp'
+    - 'Thumbs.db'
+    - 'desktop.ini'
+  schedule: manual                       # manual | daily | weekly (informational for now)
+
+  # consistency: how files are held still while they're copied and verified
+  #   live      copy while running; files that change mid-copy fail the hash check (re-run)
+  #   pause     freeze matching containers, copy, unfreeze. Seconds; no restart
+  #   stop      stop matching containers, copy, start them. Full restart
+  #   snapshot  copy from a Windows shadow copy while running. No interruption;
+  #             not built yet, so it uses pause and warns
+  # containers: name prefixes held by pause/stop/snapshot, e.g. ['app-', 'db-'].
+  #   Only running containers are held; containers are always released afterwards.
+  consistency: live
+  containers: []
+
+# ---------------------------------------------------------------------
+# Jobs: one entry per thing being backed up
+# ---------------------------------------------------------------------
+jobs:
+  - id: documents
+    name: Documents
+    enabled: true
+    source: 'C:\Users\you\Documents'
+    destination_subfolder: 'Documents'   # -> <backup_root>\Documents\<date>\
+
+  - id: projects
+    name: Project folder
+    enabled: true
+    source: 'D:\Projects'
+    destination_subfolder: 'Projects'
+    exclude_add:                         # added to the default excludes
+      - 'node_modules\'
+      - 'app\data\'                      # live app state: backed up by app-data below
+
+  - id: app-data
+    name: Container app state
+    enabled: false                       # turn on once the app is deployed
+    source: 'D:\Projects\app\data'
+    destination_subfolder: 'AppData'
+    consistency: pause
+    containers: ['app-']
+    exclude_add:
+      - 'models\'                        # large and re-downloadable
+
+# ---------------------------------------------------------------------
+# 3-2-1: three copies, two kinds of media, one off-site.
+# Any copy not 'configured' is a warning on every run until it is.
+# ---------------------------------------------------------------------
+copies:
+  - id: primary
+    description: 'Live data'
+    media: 'local disk'
+    status: configured
+  - id: local-backup
+    description: 'Dated folders in backup_root'
+    media: 'local disk'
+    status: configured
+  - id: second-media
+    description: 'A different physical disk or NAS'
+    media: '[TBD]'
+    status: missing
+  - id: offsite
+    description: 'Off-site or cloud copy'
+    media: '[TBD]'
+    status: missing
+
+# ---------------------------------------------------------------------
+# Restore testing: a backup that has never been restored is unproven
+# ---------------------------------------------------------------------
+restore_test:
+  interval_days: 30
+  last_tested: null                      # set by hand after a test restore (YYYY-MM-DD)
+  procedure: 'Restore one dated folder to a scratch location, compare hashes, open the files.'
+
+# ---------------------------------------------------------------------
+# Alerts: conditions reported loudly on every run
+# ---------------------------------------------------------------------
+alerts:
+  channel: console
+  warn_when:
+    - any_job_disabled_or_tbd
+    - copy_status_missing
+    - last_success_older_than_days: 7
+    - last_run_failed
+    - restore_test_never_or_overdue
+    - hash_mismatch

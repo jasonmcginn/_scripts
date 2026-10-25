@@ -11,6 +11,7 @@
       - nothing that looks like a secret is in the file (this repo is public)
       - no hard-coded absolute paths outside the header (use settings instead)
       - every deployed copy listed under Deployed exists and matches the library copy
+      - each script has a man page (<script name>.md) next to it
     Prints a report and exits 1 if there are errors, so it can run before a commit.
 
 .PARAMETER LibraryRoot
@@ -27,7 +28,7 @@
     .\Update-ScriptCatalog.ps1 -NoWrite
 
 .NOTES
-    Version:     1.2.0
+    Version:     1.3.0
     Status:      draft
     Changes:     writes-files
     Requires:    Windows PowerShell 5.1 or PowerShell 7
@@ -141,6 +142,11 @@ foreach ($f in $files) {
             $warns.Add("${rel}: line $($i + 1) has a hard-coded absolute path; make it a setting.")
         }
     }
+
+    # Man page next to the script
+    $man = Join-Path $f.DirectoryName ($f.BaseName + '.md')
+    if (Test-Path -LiteralPath $man) { $e['man'] = ($man.Substring($root.Length + 1) -replace '\\', '/') }
+    else { $e['man'] = ''; $warns.Add("${rel}: no man page. Add $($f.BaseName).md next to it (template in _templates).") }
 
     # Deployed copies
     $deployState = @()

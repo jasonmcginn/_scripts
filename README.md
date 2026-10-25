@@ -22,7 +22,7 @@ _scripts/
 │   ├── maintenance/    tools that look after this library
 │   └── <category>/     network, security, azure ... created when the first script needs it
 ├── python/  bash/      same categories, created when needed
-├── _templates/         starter file for each language, with the standard header
+├── _templates/         starter script and man page for each language
 └── _archive/           retired scripts (status: retired), kept for reference
 ```
 
@@ -36,6 +36,7 @@ _scripts/
 6. **Versions.** `MAJOR.MINOR.PATCH`. Bump the version and `Updated` with every change.
 7. **Status:** `draft` (in its project only) → `tested` (run and checked; can be cataloged) → `production` (relied on) → `retired` (moved to `_archive`).
 8. **Changes:** `reads-only`, `writes-files` or `changes-system`, so it's clear what a script can touch before running it.
+9. **Man page.** Every script has one next to it, with the same name and `.md` (copy from `_templates`): name, synopsis, description, options, files, exit status, examples. PowerShell scripts also answer `Get-Help <script> -Full`.
 
 ## Keeping it organized
 
