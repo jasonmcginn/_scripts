@@ -5,8 +5,8 @@
 .DESCRIPTION
     Reads the manifest, then for each enabled job:
       1. copies the source to a new dated folder with robocopy (never overwrites),
-      2. verifies every copied file against its source by SHA256,
-      3. writes hashes.sha256 into the backup folder,
+      2. verifies every copied file against its source (hash type from the manifest),
+      3. writes a hash list into the backup folder,
     Jobs can hold running containers still while they copy (consistency: live,
     pause, stop, snapshot; see the manifest), and always release them afterwards.
       4. appends one line to the history file (backup-history.jsonl).
@@ -23,6 +23,28 @@
 .PARAMETER Job
     One or more job ids to run. Defaults to every enabled job.
 
+.PARAMETER ShowHistory
+    Show the most recent runs from the history file as a table, then stop.
+    Copies nothing.
+
+.PARAMETER HistoryCount
+    How many recent runs -ShowHistory shows.
+
+.PARAMETER RobocopyRetries
+    How many times robocopy retries a file it can't copy.
+
+.PARAMETER RobocopyWaitSeconds
+    Seconds robocopy waits between retries.
+
+.PARAMETER HashFileName
+    Name of the hash list written into each backup folder.
+
+.PARAMETER MaxMismatchesShown
+    How many hash mismatches are listed one by one before they're counted.
+
+.PARAMETER DefaultStaleDays
+    Warn when a job's last success is older than this, if the manifest doesn't say.
+
 .PARAMETER InstallMissing
     Install missing dependencies without asking (for unattended runs). Without it,
     the script asks first, and stops if you say no or nobody is there to answer.
@@ -31,9 +53,10 @@
     .\Invoke-Backup.ps1
     .\Invoke-Backup.ps1 -Job professional-profile
     .\Invoke-Backup.ps1 -WhatIf
+    .\Invoke-Backup.ps1 -ShowHistory
 
 .NOTES
-    Version:     1.2.0
+    Version:     1.3.0
     Status:      draft
     Changes:     writes-files
     Requires:    Windows PowerShell 5.1 or PowerShell 7; robocopy (built in);
@@ -50,6 +73,13 @@ param(
     # ================= SETTINGS: change these, or pass them on the command line =================
     [string]$ManifestPath = (Join-Path $PSScriptRoot 'backup-manifest.yaml'),   # all folders and options live in the manifest
     [string[]]$Job,                                                              # empty = every enabled job
+    [switch]$ShowHistory,                                                        # show recent runs, copy nothing
+    [int]$HistoryCount = 20,                                                     # runs shown by -ShowHistory
+    [int]$RobocopyRetries = 1,                                                   # robocopy /R
+    [int]$RobocopyWaitSeconds = 1,                                               # robocopy /W
+    [string]$HashFileName = 'hashes.sha256',                                     # hash list in each backup folder
+    [int]$MaxMismatchesShown = 10,                                               # mismatches listed before counting
+    [int]$DefaultStaleDays = 7,                                                  # used if the manifest has no limit
     [switch]$InstallMissing                                                      # install missing dependencies without asking
     # ============================================================================================
 )
@@ -201,7 +231,14 @@ if (Get-Module -ListAvailable -Name powershell-yaml) {
 }
 Import-Module powershell-yaml
 
-if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "Manifest not found: $ManifestPath" }
+if (-not (Test-Path -LiteralPath $ManifestPath)) {
+    Write-Host ''
+    Write-Host "  No manifest at: $ManifestPath" -ForegroundColor Red
+    Write-Host '  This script reads backup-manifest.yaml from its own folder unless told otherwise.'
+    Write-Host '  If this is the library copy, run the deployed copy next to your manifest instead,'
+    Write-Host '  or point this one at it:  .\Invoke-Backup.ps1 -ManifestPath <path to backup-manifest.yaml>'
+    exit 2
+}
 $m = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Yaml
 $d = $m['defaults']
 $root = $d['backup_root']
@@ -210,13 +247,24 @@ $logDir = Join-Path $root $d['logs_folder']
 if (-not (Test-Path -LiteralPath $root)) { throw "Backup root not found: $root" }
 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
+if ($ShowHistory) {
+    if (-not (Test-Path -LiteralPath $historyPath)) { Write-Host "  No history yet: $historyPath"; exit 0 }
+    Write-Section "Backup history (last $HistoryCount runs)"
+    $rows = @(Get-Content -LiteralPath $historyPath | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -Last $HistoryCount)
+    $table = $rows | Select-Object @{n = 'Time'; e = { ([datetime]$_.time).ToString('yyyy-MM-dd HH:mm') } }, job, status, files,
+        @{n = 'MB'; e = { [math]::Round($_.bytes / 1MB, 1) } }, @{n = 'Seconds'; e = { $_.duration_s } },
+        @{n = 'Mismatches'; e = { $_.hash_mismatches } }, @{n = 'Mode'; e = { if ($_.PSObject.Properties['consistency']) { $_.consistency } else { '' } } }
+    Write-Host (($table | Format-Table -AutoSize | Out-String).TrimEnd())
+    exit 0
+}
+
 function Get-History {
     if (-not (Test-Path -LiteralPath $historyPath)) { return @() }
     return @(Get-Content -LiteralPath $historyPath | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
 }
 
 # Thresholds from the alerts section
-$staleDays = 7
+$staleDays = $DefaultStaleDays
 foreach ($w in @($m['alerts']['warn_when'])) {
     if ($w -is [System.Collections.IDictionary] -and $w.Contains('last_success_older_than_days')) {
         $staleDays = [int]$w['last_success_older_than_days']
@@ -310,6 +358,12 @@ foreach ($j in $jobs) {
         if (-not (Test-Path -LiteralPath $src)) { throw "Source not found: $src" }
 
         $method = Get-Setting $j $d 'method'
+        $verify = Get-Setting $j $d 'verify'
+        $hashAlgo = 'SHA256'; $writeHashFile = $true
+        if ($verify -is [System.Collections.IDictionary]) {
+            if ($verify['hash']) { $hashAlgo = [string]$verify['hash'] }
+            if ($verify.Contains('write_hash_file')) { $writeHashFile = [bool]$verify['write_hash_file'] }
+        }
         if ($method -eq 'compress') { Add-Warning "Job '$id': compress is not built yet. Copying instead." }
 
         $stamp = Get-Date -Format (Get-Setting $j $d 'folder_name_format')
@@ -357,7 +411,7 @@ foreach ($j in $jobs) {
           }
           try {
             $log = Join-Path $logDir ('{0}_{1}.log' -f $id, (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
-            $rcArgs = @($src, $dest, '/E', '/COPY:DAT', '/DCOPY:DAT', '/R:1', '/W:1', '/XJ', '/NP', "/UNILOG:$log")
+            $rcArgs = @($src, $dest, '/E', '/COPY:DAT', '/DCOPY:DAT', "/R:$RobocopyRetries", "/W:$RobocopyWaitSeconds", '/XJ', '/NP', "/UNILOG:$log")
             if ($xf.Count -gt 0) { $rcArgs += '/XF'; $rcArgs += $xf }
             if ($xd.Count -gt 0) { $rcArgs += '/XD'; $rcArgs += $xd }
 
@@ -368,25 +422,25 @@ foreach ($j in $jobs) {
             if (-not (Test-Path -LiteralPath $dest)) { throw "Nothing was copied (robocopy exit $rc). See $log" }
 
             # Verify: every copied file must match its source
-            Write-Host '  Verifying SHA256 hashes...'
+            Write-Host "  Verifying $hashAlgo hashes..."
             $lines = New-Object System.Collections.Generic.List[string]
             $files = @(Get-ChildItem -LiteralPath $dest -Recurse -File -Force)
             foreach ($f in $files) {
                 $rel = $f.FullName.Substring($dest.Length).TrimStart('\')
                 $srcFile = Join-Path $src $rel
                 try {
-                    $hd = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
-                    $hs = (Get-FileHash -LiteralPath $srcFile -Algorithm SHA256).Hash
+                    $hd = (Get-FileHash -LiteralPath $f.FullName -Algorithm $hashAlgo).Hash
+                    $hs = (Get-FileHash -LiteralPath $srcFile -Algorithm $hashAlgo).Hash
                 } catch { $hd = 'ERROR'; $hs = $null }
                 if ($hd -ne $hs) {
                     $mismatch++
-                    if ($mismatch -le 10) { Add-Warning "Hash mismatch or unreadable: $rel" }
+                    if ($mismatch -le $MaxMismatchesShown) { Add-Warning "Hash mismatch or unreadable: $rel" }
                 }
                 $lines.Add("$hd  $rel")
                 $count++; $bytes += $f.Length
             }
-            if ($mismatch -gt 10) { Add-Warning "...and $($mismatch - 10) more mismatches." }
-            [IO.File]::WriteAllLines((Join-Path $dest 'hashes.sha256'), $lines)
+            if ($mismatch -gt $MaxMismatchesShown) { Add-Warning "...and $($mismatch - $MaxMismatchesShown) more mismatches." }
+            if ($writeHashFile) { [IO.File]::WriteAllLines((Join-Path $dest $HashFileName), $lines) }
 
             if ($mismatch -gt 0) {
                 $message = "$mismatch file(s) did not match their source. A file may have changed during the backup; close open apps and run again."

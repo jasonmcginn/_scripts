@@ -27,7 +27,7 @@
     .\Update-ScriptCatalog.ps1 -NoWrite
 
 .NOTES
-    Version:     1.1.0
+    Version:     1.2.0
     Status:      draft
     Changes:     writes-files
     Requires:    Windows PowerShell 5.1 or PowerShell 7
@@ -51,6 +51,10 @@ param(
         '(?i)AccountKey=[A-Za-z0-9+/=]{20,}',
         '(?i)[?&]sig=[A-Za-z0-9%]{10,}'
     ),
+    [string[]]$ValidStatus = @('draft', 'tested', 'production', 'retired'),
+    [string[]]$ValidChanges = @('reads-only', 'writes-files', 'changes-system'),
+    [string]$DraftAllowedPattern = '^powershell[\\/]maintenance[\\/]',   # library tools may stay draft
+    [int]$HeaderLines = 80,                                                # how far down headers are read
     [switch]$NoWrite
     # ============================================================================================
 )
@@ -81,7 +85,7 @@ function Get-Synopsis([string[]]$Lines, [string]$Ext) {
 
 function Get-VersionOf([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    return (Get-HeaderField @(Get-Content -LiteralPath $Path -TotalCount 80) 'Version')
+    return (Get-HeaderField @(Get-Content -LiteralPath $Path -TotalCount $HeaderLines) 'Version')
 }
 
 if (-not (Test-Path -LiteralPath $LibraryRoot)) { throw "Library not found: $LibraryRoot" }
@@ -98,7 +102,7 @@ foreach ($f in $files) {
     $rel = $f.FullName.Substring($root.Length + 1)
     $lines = @(Get-Content -LiteralPath $f.FullName)
     $text = $lines -join "`n"
-    $headLines = @($lines | Select-Object -First 80)
+    $headLines = @($lines | Select-Object -First $HeaderLines)
     $e = [ordered]@{ path = ($rel -replace '\\', '/'); name = $f.BaseName; language = $f.Extension.TrimStart('.') }
     $e['synopsis'] = Get-Synopsis $headLines $f.Extension
     foreach ($n in $fields) { $e[$n.ToLower()] = Get-HeaderField $headLines $n }
@@ -106,14 +110,14 @@ foreach ($f in $files) {
     foreach ($req in @('synopsis', 'version', 'status', 'changes')) {
         if (-not $e[$req]) { $errors.Add("${rel}: header is missing '$req'.") }
     }
-    if ($e['status'] -and @('draft', 'tested', 'production', 'retired') -notcontains $e['status']) {
-        $warns.Add("${rel}: status '$($e['status'])' is not draft, tested, production or retired.")
+    if ($e['status'] -and $ValidStatus -notcontains $e['status']) {
+        $warns.Add("${rel}: status '$($e['status'])' is not one of: $($ValidStatus -join ', ').")
     }
-    if ($e['status'] -eq 'draft' -and $rel -notmatch '^powershell[\\/]maintenance[\\/]') {
+    if ($e['status'] -eq 'draft' -and $rel -notmatch $DraftAllowedPattern) {
         $warns.Add("${rel}: status is draft. Drafts stay in their project until a working version is approved.")
     }
-    if ($e['changes'] -and @('reads-only', 'writes-files', 'changes-system') -notcontains $e['changes']) {
-        $warns.Add("${rel}: changes '$($e['changes'])' is not reads-only, writes-files or changes-system.")
+    if ($e['changes'] -and $ValidChanges -notcontains $e['changes']) {
+        $warns.Add("${rel}: changes '$($e['changes'])' is not one of: $($ValidChanges -join ', ').")
     }
 
     if ($f.Extension -eq '.ps1') {

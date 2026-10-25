@@ -14,6 +14,12 @@
 .PARAMETER FileNamePrefix
     Start of the report file name.
 
+.PARAMETER DateFormat
+    Date format used in the file name.
+
+.PARAMETER LineWidth
+    Width used when formatting tables in the report.
+
 .PARAMETER ShowReport
     Also print the report to the console.
 
@@ -22,7 +28,7 @@
     .\Get-HardwareReport.ps1 -OutputFolder 'D:\Reports' -ShowReport
 
 .NOTES
-    Version:     1.0.0
+    Version:     1.1.0
     Status:      draft
     Changes:     writes-files
     Requires:    Windows 10 or 11, Windows PowerShell 5.1 or PowerShell 7
@@ -39,6 +45,8 @@ param(
     # ================= SETTINGS: change these, or pass them on the command line =================
     [string]$OutputFolder = [Environment]::GetFolderPath('MyDocuments'),
     [string]$FileNamePrefix = 'hardware',
+    [string]$DateFormat = 'yyyy-MM-dd',
+    [int]$LineWidth = 200,
     [switch]$ShowReport
     # ============================================================================================
 )
@@ -49,7 +57,7 @@ $ErrorActionPreference = 'Stop'
 $sb = New-Object System.Text.StringBuilder
 function Add-Section([string]$Title, $Body) {
     [void]$sb.AppendLine("== $Title ==")
-    [void]$sb.AppendLine((($Body | Out-String -Width 200).TrimEnd()))
+    [void]$sb.AppendLine((($Body | Out-String -Width $LineWidth).TrimEnd()))
     [void]$sb.AppendLine('')
 }
 function Invoke-Tool([string]$Name, [string[]]$Arguments) {
@@ -97,7 +105,7 @@ Add-Section 'Ollama' (Invoke-Tool 'ollama' @('--version'))
 
 # --- Save
 if (-not (Test-Path -LiteralPath $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder | Out-Null }
-$file = Join-Path $OutputFolder ('{0}-{1}.txt' -f $FileNamePrefix, (Get-Date -Format 'yyyy-MM-dd'))
+$file = Join-Path $OutputFolder ('{0}-{1}.txt' -f $FileNamePrefix, (Get-Date -Format $DateFormat))
 $header = "Hardware report for $env:COMPUTERNAME, $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n`r`n"
 [IO.File]::WriteAllText($file, $header + $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
 
