@@ -27,7 +27,7 @@
     .\Update-ScriptCatalog.ps1 -NoWrite
 
 .NOTES
-    Version:     1.0.0
+    Version:     1.1.0
     Status:      draft
     Changes:     writes-files
     Requires:    Windows PowerShell 5.1 or PowerShell 7
@@ -108,6 +108,9 @@ foreach ($f in $files) {
     }
     if ($e['status'] -and @('draft', 'tested', 'production', 'retired') -notcontains $e['status']) {
         $warns.Add("${rel}: status '$($e['status'])' is not draft, tested, production or retired.")
+    }
+    if ($e['status'] -eq 'draft' -and $rel -notmatch '^powershell[\\/]maintenance[\\/]') {
+        $warns.Add("${rel}: status is draft. Drafts stay in their project until a working version is approved.")
     }
     if ($e['changes'] -and @('reads-only', 'writes-files', 'changes-system') -notcontains $e['changes']) {
         $warns.Add("${rel}: changes '$($e['changes'])' is not reads-only, writes-files or changes-system.")
