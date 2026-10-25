@@ -7,6 +7,8 @@
       1. copies the source to a new dated folder with robocopy (never overwrites),
       2. verifies every copied file against its source by SHA256,
       3. writes hashes.sha256 into the backup folder,
+    Jobs can hold running containers still while they copy (consistency: live,
+    pause, stop, snapshot; see the manifest), and always release them afterwards.
       4. appends one line to the history file (backup-history.jsonl).
     Health warnings (3-2-1 gaps, untested restores, stale or failed backups,
     unconfigured jobs) are printed loudly at the start and the end of every run.
@@ -27,7 +29,7 @@
     .\Invoke-Backup.ps1 -WhatIf
 
 .NOTES
-    Version:     1.0.0
+    Version:     1.1.0
     Status:      draft
     Changes:     writes-files
     Requires:    Windows PowerShell 5.1 or PowerShell 7; robocopy (built in);
@@ -70,6 +72,27 @@ function Write-Section([string]$Title) {
     Write-Host ('=' * 70) -ForegroundColor Cyan
     Write-Host " $Title" -ForegroundColor Cyan
     Write-Host ('=' * 70) -ForegroundColor Cyan
+}
+
+function Get-HoldTargets([string[]]$Prefixes) {
+    # Running containers whose names start with any of the prefixes. Empty if Docker isn't available.
+    if (-not $Prefixes -or $Prefixes.Count -eq 0) { return @() }
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return @() }
+    $ErrorActionPreference = 'Continue'
+    $names = @(& docker ps --format '{{.Names}}' 2>$null)
+    if ($LASTEXITCODE -ne 0) { return @() }
+    return @($names | Where-Object { $n = $_; @($Prefixes | Where-Object { $n.StartsWith($_) }).Count -gt 0 })
+}
+
+function Invoke-Hold([string]$Mode, [string[]]$Names, [switch]$Release) {
+    # pause/unpause or stop/start the named containers. Throws if Docker refuses.
+    $verb = switch ($Mode) {
+        'pause' { if ($Release) { 'unpause' } else { 'pause' } }
+        'stop'  { if ($Release) { 'start' }   else { 'stop' } }
+    }
+    $ErrorActionPreference = 'Continue'
+    $out = & docker $verb @Names 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "docker $verb failed: $($out -join ' ')" }
 }
 
 function Get-RetentionCandidates([string]$Parent, $Retention) {
@@ -200,7 +223,7 @@ foreach ($j in $jobs) {
     Write-Section "Job: $id ($($j['name']))"
     $started = Get-Date
     $status = 'failed'; $message = ''; $rc = $null; $count = 0; $bytes = 0; $mismatch = 0
-    $dest = $null; $log = $null
+    $dest = $null; $log = $null; $mode = $null; $held = @(); $holdStart = $null; $holdSeconds = 0
 
     try {
         $src = [string]$j['source']
@@ -229,11 +252,30 @@ foreach ($j in $jobs) {
             }
         }
 
+        # Consistency: how files are held still while they're copied (see the manifest)
+        $mode = [string](Get-Setting $j $d 'consistency')
+        if (-not $mode) { $mode = 'live' }
+        if (@('live', 'pause', 'stop', 'snapshot') -notcontains $mode) { throw "Unknown consistency '$mode' (use live, pause, stop or snapshot)." }
+        $holdMode = $mode
+        if ($mode -eq 'snapshot') {
+            Add-Warning "Job '$id': snapshot is not built yet. Using pause instead."
+            $holdMode = 'pause'
+        }
+        $targets = @()
+        if ($holdMode -ne 'live') { $targets = @(Get-HoldTargets @(Get-Setting $j $d 'containers')) }
+
         Write-Host "  Source:      $src"
         Write-Host "  Destination: $dest"
+        Write-Host "  Consistency: $mode$(if ($targets.Count) { " ($($targets.Count) container(s): $($targets -join ', '))" } elseif ($holdMode -ne 'live') { ' (no matching containers running, so nothing is changing the files)' })"
         if (-not $PSCmdlet.ShouldProcess($dest, "Copy $src")) {
             $status = 'whatif'; $message = 'Dry run, nothing copied.'
         } else {
+          if ($targets.Count -gt 0) {
+              Write-Host "  Holding containers ($holdMode)..."
+              Invoke-Hold $holdMode $targets
+              $held = $targets; $holdStart = Get-Date
+          }
+          try {
             $log = Join-Path $logDir ('{0}_{1}.log' -f $id, (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
             $rcArgs = @($src, $dest, '/E', '/COPY:DAT', '/DCOPY:DAT', '/R:1', '/W:1', '/XJ', '/NP', "/UNILOG:$log")
             if ($xf.Count -gt 0) { $rcArgs += '/XF'; $rcArgs += $xf }
@@ -273,6 +315,18 @@ foreach ($j in $jobs) {
                 $status = 'success'
                 $message = "robocopy exit $rc"
             }
+          } finally {
+            # Always release held containers, even if the copy failed
+            if ($held.Count -gt 0) {
+                try {
+                    Invoke-Hold $holdMode $held -Release
+                    $holdSeconds = [math]::Round(((Get-Date) - $holdStart).TotalSeconds, 1)
+                    Write-Host "  Released $($held.Count) container(s) after $holdSeconds s."
+                } catch {
+                    Add-Warning "COULD NOT RELEASE CONTAINERS ($holdMode): $($held -join ', '). Release them by hand. $($_.Exception.Message)"
+                }
+            }
+          }
 
             # Retention: report only
             $cands = @(Get-RetentionCandidates $destParent (Get-Setting $j $d 'retention'))
@@ -299,6 +353,9 @@ foreach ($j in $jobs) {
             bytes           = $bytes
             hash_mismatches = $mismatch
             robocopy_exit   = $rc
+            consistency     = $mode
+            held_containers = $held.Count
+            hold_s          = $holdSeconds
             duration_s      = $duration
             log             = $log
             message         = $message
