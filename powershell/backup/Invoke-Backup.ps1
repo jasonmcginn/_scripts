@@ -23,13 +23,17 @@
 .PARAMETER Job
     One or more job ids to run. Defaults to every enabled job.
 
+.PARAMETER InstallMissing
+    Install missing dependencies without asking (for unattended runs). Without it,
+    the script asks first, and stops if you say no or nobody is there to answer.
+
 .EXAMPLE
     .\Invoke-Backup.ps1
     .\Invoke-Backup.ps1 -Job professional-profile
     .\Invoke-Backup.ps1 -WhatIf
 
 .NOTES
-    Version:     1.1.0
+    Version:     1.2.0
     Status:      draft
     Changes:     writes-files
     Requires:    Windows PowerShell 5.1 or PowerShell 7; robocopy (built in);
@@ -45,7 +49,8 @@
 param(
     # ================= SETTINGS: change these, or pass them on the command line =================
     [string]$ManifestPath = (Join-Path $PSScriptRoot 'backup-manifest.yaml'),   # all folders and options live in the manifest
-    [string[]]$Job                                                               # empty = every enabled job
+    [string[]]$Job,                                                              # empty = every enabled job
+    [switch]$InstallMissing                                                      # install missing dependencies without asking
     # ============================================================================================
 )
 
@@ -132,10 +137,67 @@ function Get-RetentionCandidates([string]$Parent, $Retention) {
 # ------------------------------------------------------------------
 # Load the manifest
 # ------------------------------------------------------------------
-if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
-    Write-Host 'The powershell-yaml module is needed to read the manifest. Install it once with:' -ForegroundColor Red
-    Write-Host '    Install-Module powershell-yaml -Scope CurrentUser' -ForegroundColor Red
+# ------------------------------------------------------------------
+# Dependencies
+# ------------------------------------------------------------------
+function Test-IsAdmin {
+    if ((Get-Variable IsWindows -ErrorAction SilentlyContinue) -and -not $IsWindows) { return $false }
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Confirm-Action([string]$Question) {
+    # Yes/No prompt. Returns $false if nobody can answer (unattended or -NonInteractive).
+    if ($InstallMissing) { return $true }
+    try {
+        $choices = [System.Management.Automation.Host.ChoiceDescription[]]@('&Yes', '&No')
+        return ($Host.UI.PromptForChoice('Dependency missing', $Question, $choices, 1) -eq 0)
+    } catch { return $false }
+}
+
+function Install-YamlModule {
+    # Installs powershell-yaml for the current user only: no administrator rights needed.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    if ($PSVersionTable.PSVersion.Major -lt 6 -and -not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) {
+        Write-Host '  Installing the NuGet provider (current user)...'
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+    }
+    Write-Host '  Installing powershell-yaml from the PowerShell Gallery (current user)...'
+    Install-Module -Name powershell-yaml -Scope CurrentUser -Repository PSGallery -Force
+}
+
+Write-Section 'Dependencies'
+$isAdmin = Test-IsAdmin
+Write-Host ("  Running as administrator: {0}" -f $(if ($isAdmin) { 'yes' } else { 'no (not needed for copy, pause or stop)' }))
+
+if (-not (Get-Command robocopy -ErrorAction SilentlyContinue)) {
+    Write-Host '  robocopy: MISSING. It ships with Windows; this script needs Windows.' -ForegroundColor Red
     exit 2
+}
+Write-Host '  robocopy: found'
+
+if (Get-Module -ListAvailable -Name powershell-yaml) {
+    Write-Host '  powershell-yaml: found'
+} else {
+    Write-Host '  powershell-yaml: MISSING. Needed to read the manifest.' -ForegroundColor Yellow
+    Write-Host '    Installs for your user only (no administrator rights needed), from the PowerShell Gallery.'
+    if (Confirm-Action 'Install powershell-yaml for your user now?') {
+        try { Install-YamlModule } catch {
+            Write-Host "  Install failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host '  Install it by hand with: Install-Module powershell-yaml -Scope CurrentUser' -ForegroundColor Red
+            exit 2
+        }
+        if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
+            Write-Host '  Install did not complete (see the message above).' -ForegroundColor Red
+            Write-Host '  Install it by hand with: Install-Module powershell-yaml -Scope CurrentUser' -ForegroundColor Red
+            exit 2
+        }
+        Write-Host '  powershell-yaml: installed' -ForegroundColor Green
+    } else {
+        Write-Host '  Not installed. Run again and answer Yes, use -InstallMissing, or install it with:' -ForegroundColor Red
+        Write-Host '    Install-Module powershell-yaml -Scope CurrentUser' -ForegroundColor Red
+        exit 2
+    }
 }
 Import-Module powershell-yaml
 
@@ -212,6 +274,24 @@ if ($Job) {
     $ids = @($jobs | ForEach-Object { $_['id'] })
     foreach ($want in $Job) { if ($ids -notcontains $want) { Add-Warning "Job '$want' was requested but is not found or not enabled." } }
     $jobs = @($jobs | Where-Object { $Job -contains $_['id'] })
+}
+
+# Dependencies that depend on the chosen jobs
+$holdJobs = @($jobs | Where-Object { @('pause', 'stop', 'snapshot') -contains [string](Get-Setting $_ $d 'consistency') })
+if ($holdJobs.Count -gt 0) {
+    $dockerState = 'not installed'
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        $ErrorActionPreference = 'Continue'
+        & docker info --format '{{.ServerVersion}}' 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { $dockerState = 'running' } else { $dockerState = 'installed, engine not running' }
+        $ErrorActionPreference = 'Stop'
+    }
+    Write-Host "  docker: $dockerState (needed to hold containers for: $(@($holdJobs | ForEach-Object { $_['id'] }) -join ', '))"
+    if ($dockerState -ne 'running') { Write-Host '    No containers can be running, so their files are not changing; those jobs copy without holding.' }
+}
+$snapJobs = @($jobs | Where-Object { [string](Get-Setting $_ $d 'consistency') -eq 'snapshot' })
+if ($snapJobs.Count -gt 0 -and -not $isAdmin) {
+    Add-Warning "Snapshot mode will need an administrator PowerShell once it's built (Windows shadow copies). For now it uses pause."
 }
 
 # ------------------------------------------------------------------
